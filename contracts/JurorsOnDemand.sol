@@ -17,10 +17,11 @@ import "@kleros/ethereum-libraries/contracts/CappedMath.sol";
 /** @title Auto Appealable Arbitrator
  *  @dev This is a centralized arbitrator which either gives direct rulings or provides a time and fee for appeal.
  */
-contract AutoAppealableArbitrator is IArbitrator {
+contract JurorsOnDemandArbitrator is IArbitrator {
     using CappedMath for uint; // Operations bounded between 0 and 2**256 - 1.
 
     address public owner = msg.sender;
+    uint256 public constant WORD_SIZE = 32;
     uint256 public constant MULTIPLIER_DIVISOR = 10000; // Divisor parameter for multipliers.
     uint256 public constant DEFAULT_MIN_PRICE = 0;
     uint256 public constant NOT_PAYABLE_VALUE = (2**256-2)/2; // High value to be sure that the appeal is too expensive.
@@ -33,6 +34,7 @@ contract AutoAppealableArbitrator is IArbitrator {
         uint256 rulingTimeout;
         uint256 appealTimeout;
         IArbitrator backupArbitrator;
+        address[] whiteList;
         bytes backupArbitratorExtraData;
     }
 
@@ -237,20 +239,40 @@ contract AutoAppealableArbitrator is IArbitrator {
     }
 
      /** @dev Gets a subcourt ID and the minimum number of jurors required from a specified extra data bytes array.
-     *  @param _rawExtraData The extra data bytes array. The first 32 bytes are the subcourt ID and the next 32 bytes are the minimum number of jurors.
+     *  @param _rawExtraData The extra data bytes array.
      *  @return extraData .
      */
     function decodeExtraData(bytes calldata _rawExtraData) internal view returns (ExtraData memory extraData) {
-        if (_rawExtraData.length >= 128) {
-            assembly { // solium-disable-line security/no-inline-assembly
-                extraData.minPrice := mload(add(_rawExtraData, 0x20))
-                extraData.deadline := mload(add(_rawExtraData, 0x40))
-                extraData.rulingTimeout := mload(add(_rawExtraData, 0x60))
-                extraData.appealTimeout := mload(add(_rawExtraData, 0x80))
-                extraData.backupArbitrator := mload(add(_extraData, 0xA0))
-                extraData.backupArbitratorExtraData := mload(add(_extraData, 0xC0))
-            }
+        uint256 whiteListSize;
+        
+        // Decode fix sized data
+        (
+            extraData.deadline, 
+            extraData.minPrice, 
+            extraData.rulingTimeout, 
+            extraData.appealTimeout, 
+            extraData.backupArbitrator, 
+            whiteListSize,
+        ) = abi.decode(
+            _rawExtraData[0:WORD_SIZE*6], 
+            (uint256, uint256, uint256, uint256, address, uint256)
+        );
+        
+        // Decode whitelist if any
+        extraData.whiteList = new address[](whiteListSize);
+        uint256 start = WORD_SIZE*6;
+        for (uint256 i = 0; i < whiteListSize; i++) {
+            extraData.whiteList[i] = abi.decode(
+                _rawExtraData[start + i*WORD_SIZE: start + (i+1)*WORD_SIZE], 
+                (address)
+            );
         }
+
+        // Decode extraData of the backup arbitrator
+        extraData.backupArbitratorExtraData = abi.decode(
+            _rawExtraData[start + whiteListSize*WORD_SIZE:], 
+            (bytes)
+        );
     }
 
     /** @dev Return the status of a dispute (in the sense of ERC792, not the Dispute property).
