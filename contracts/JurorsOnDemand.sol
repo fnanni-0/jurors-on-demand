@@ -243,6 +243,7 @@ contract JurorsOnDemandArbitrator is IArbitrator {
      *  @return extraData .
      */
     function decodeExtraData(bytes calldata _rawExtraData) internal view returns (ExtraData memory extraData) {
+        // TODO: check vulnerabilities regarding calldata manipulation
         uint256 whiteListSize;
         
         // Decode fix sized data
@@ -269,10 +270,12 @@ contract JurorsOnDemandArbitrator is IArbitrator {
         }
 
         // Decode extraData of the backup arbitrator
-        extraData.backupArbitratorExtraData = abi.decode(
-            _rawExtraData[start + whiteListSize*WORD_SIZE:], 
-            (bytes)
-        );
+        start += whiteListSize*WORD_SIZE;
+        uint256 remainingBytes = _rawExtraData.length - start;
+        extraData.backupArbitratorExtraData = new bytes(remainingBytes);
+        for (uint256 i = 0; i < remainingBytes; i++) {
+            extraData.backupArbitratorExtraData[i] = _rawExtraData[start + i];
+        }
     }
 
     /** @dev Return the status of a dispute (in the sense of ERC792, not the Dispute property).
