@@ -8,7 +8,7 @@
  *  @deployments: []
  */
 
-pragma solidity >=0.7;
+pragma solidity ^0.7;
 
 import "@kleros/erc-792/contracts/IArbitrator.sol";
 import "@kleros/erc-792/contracts/IArbitrable.sol";

@@ -8,7 +8,7 @@
  *  @deployments: []
  */
 
-pragma solidity >=0.7;
+pragma solidity ^0.7;
 
 import '.././JurorsOnDemand.sol'
 
@@ -38,10 +38,9 @@ contract OnlyHumanJurors {
     IProofOfHumanity public immutable proofOfHumanity;
     JurorsOnDemandArbitrator public immutable jurorsOnDemand;
 
-    mapping(uint256 => address) disputeIDtoJuror;
+    mapping(uint256 => address) public disputeIDtoJuror;
 
     /** @dev Constructor.
-     *  @param _token The token the UBI is paid with.
      *  @param _proofOfHumanity The Proof Of Humanity registry to reference.
      *  @param _jurorsOnDemand The jurorsOnDemand arbitrator.
      */
@@ -67,9 +66,7 @@ contract OnlyHumanJurors {
 
     function giveRuling(uint256 _disputeID, uint256 _ruling) external {
         require(disputeIDtoJuror[_disputeID] == msg.sender, "Caller is not the juror");
-
         jurorsOnDemand.giveRuling(_disputeID, _ruling);
-
     }
 
     function withdraw(uint256 _disputeID) external {
