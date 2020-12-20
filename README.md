@@ -32,8 +32,14 @@ Notice that this does not make JurorsOnDemand an arbitrable contract, although t
 
 The backup arbitrator could be, for example, a private arbitrator contract, this contract with another configuration or a Kleros court.
 
+
 # Future work
 
-- Implement hash-not-store pattern to save gas.
+- Restrict backup arbitrators to a whitelist maintained by the contract owner/governor.
+- Using the same appeal-delegation concept, implement this same contract or another arbitrator with cross-chain logic. For example, let first round of arbitration happen on xDai chain and delegate appeals to mainnet.
+- Optimize gas costs by packing state variables or implementing hash-not-store pattern.
 - Implement a tokenize version of the contract, in order to allow payments in any ERC20 token.
+- Consider to have an individual meta-evidence for each dispute.
+- Appeal extra-data is ignored?
+- Explore ways to decouple arbitrator's and backup arbitrator's rulings. Not necesarily should they rule over the same thing.
 
