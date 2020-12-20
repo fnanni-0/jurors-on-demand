@@ -10,14 +10,15 @@
 
 pragma solidity >=0.7;
 
-import "@kleros/erc-792/contracts/IArbitrable.sol";
 import "@kleros/erc-792/contracts/IArbitrator.sol";
+import "@kleros/erc-792/contracts/IArbitrable.sol";
+import "@kleros/erc-792/contracts/erc-1497/IEvidence.sol";
 import "@kleros/ethereum-libraries/contracts/CappedMath.sol";
 
 /** @title Auto Appealable Arbitrator
  *  @dev This is a centralized arbitrator which either gives direct rulings or provides a time and fee for appeal.
  */
-contract JurorsOnDemandArbitrator is IArbitrator {
+contract JurorsOnDemandArbitrator is IArbitrator, IArbitrable, IEvidence {
     using CappedMath for uint; // Operations bounded between 0 and 2**256 - 1.
 
     address public owner = msg.sender;
@@ -25,8 +26,9 @@ contract JurorsOnDemandArbitrator is IArbitrator {
     uint256 public constant MULTIPLIER_DIVISOR = 10000; // Divisor parameter for multipliers.
     uint256 public constant DEFAULT_MIN_PRICE = 0;
     uint256 public constant NOT_PAYABLE_VALUE = (2**256-2)/2; // High value to be sure that the appeal is too expensive.
+    uint256 public constant META_EVIDENCE_ID = 0;
 
-    enum JurorStatus { Vacant, Assigned, RuleGiven, Challenged }
+    enum JurorStatus { Vacant, Assigned, RulingGiven, Challenged, Resolved }
 
     struct ExtraData {
         uint256 deadline;
@@ -53,15 +55,17 @@ contract JurorsOnDemandArbitrator is IArbitrator {
         uint256 sumDeposit;
         uint256 rulingTimeout;     // The current ruling.
         uint256 ruling;            // The current ruling.
-        uint256 appealCost;        // The cost to appeal. 0 before it is appealable.
         uint256 appealTimeout;     // Only valid fot the first appeal. Afterwards, the backup arbitrator handles the appeal periods
         uint256 appealID;          // disputeID of the dispute delegated to the backup arbitrator.
+        address[] whiteList;
     }
 
-    Dispute[] public disputes;
     uint256 public arbitrationCostMultiplier; // Multiplier for calculating the arbitration cost related part of the deposit translator must pay to self-assign a task.
     uint256 public assignationMultiplier; // Multiplier for calculating the task price related part of the deposit translator must pay to self-assign a task.
     uint256 public challengeMultiplier; // Multiplier for calculating the value of the deposit challenger must pay to challenge a translation.
+
+    Dispute[] public disputes;
+    mapping(address => mapping(uint256 => uint256)) appealToDisputeID; // appealToDisputeID[backupArbitrator][dispute.appealID]
 
     /** @dev To be emitted when a translator assigns a task to himself.
      *  @param _disputeID The ID of the assigned task.
@@ -73,15 +77,16 @@ contract JurorsOnDemandArbitrator is IArbitrator {
     modifier onlyOwner {require(msg.sender==owner, "Can only be called by the owner."); _;}
 
     /** @dev Constructor. 
+     *  @param _metaEvidence A URI of a meta-evidence object for disputes, meant for backup arbitrators.
      */
-    constructor() {
-
+    constructor(string memory _metaEvidence) {
+        emit MetaEvidence(META_EVIDENCE_ID, _metaEvidence);
     }
 
     /** @dev Cost of arbitration. Accessor to arbitrationPrice.
      *  @return Minimum amount to be paid.
      */
-    function arbitrationCost(bytes memory) public view override returns(uint) {
+    function arbitrationCost(bytes calldata) external view override returns(uint) {
         return DEFAULT_MIN_PRICE;
     }
 
@@ -89,12 +94,17 @@ contract JurorsOnDemandArbitrator is IArbitrator {
      *  @param _disputeID ID of the dispute to be appealed.
      *  @return fee Amount to be paid.
      */
-    function appealCost(uint _disputeID, bytes memory) public view override returns(uint fee) {
+    function appealCost(uint _disputeID, bytes calldata) external view override returns(uint fee) {
         Dispute storage dispute = disputes[_disputeID];
-        if (dispute.status == DisputeStatus.Appealable)
-            return dispute.appealCost;
+        if (dispute.status != DisputeStatus.Appealable)
+            fee = NOT_PAYABLE_VALUE;
+            
+        if (dispute.jurorStatus == JurorStatus.RulingGiven)
+            fee = dispute.backupArbitrator.arbitrationCost(dispute.backupArbitratorExtraData);
+        else if (dispute.jurorStatus == JurorStatus.Challenged)
+            fee = dispute.backupArbitrator.appealCost(dispute.appealID, dispute.backupArbitratorExtraData);
         else
-            return NOT_PAYABLE_VALUE;
+            fee = NOT_PAYABLE_VALUE;
     }
 
     /** @dev Create a dispute. Must be called by the arbitrable contract.
@@ -103,10 +113,10 @@ contract JurorsOnDemandArbitrator is IArbitrator {
      *  @param _rawExtraData Can be used to give additional info on the dispute to be created.
      *  @return disputeID ID of the dispute created.
      */
-    function createDispute(uint256 _choices, bytes calldata _rawExtraData) public payable override returns(uint256 disputeID) {
+    function createDispute(uint256 _choices, bytes calldata _rawExtraData) external payable override returns(uint256 disputeID) {
         ExtraData memory extraData = decodeExtraData(_rawExtraData);
         require(msg.value >= extraData.minPrice, "Not enough ETH.");
-        require(extraData.deadline >= block.timestamp, "The deadline should be in the future.");
+        require(extraData.deadline > block.timestamp, "The deadline must be in the future.");
         require(extraData.backupArbitrator != IArbitrator(0x0), "Invalid backup arbitrator.");
 
         Dispute storage dispute = disputes.push(); // Create the dispute and return its number.
@@ -121,13 +131,11 @@ contract JurorsOnDemandArbitrator is IArbitrator {
         dispute.deadline = extraData.deadline;
         dispute.lastInteraction = block.timestamp;
         dispute.rulingTimeout = extraData.rulingTimeout;
-        dispute.ruling = 0;
-        dispute.appealCost = 0;
         dispute.appealTimeout = extraData.appealTimeout;
-
-        emit DisputeCreation(disputeID, IArbitrable(msg.sender));
+        dispute.whiteList = extraData.whiteList;
 
         disputeID = disputes.length; // disputeID E [1, uint256(-1)]
+        emit DisputeCreation(disputeID, IArbitrable(msg.sender));
     }
 
     /** @dev Assigns a specific task to the sender. Requires a translator's deposit.
@@ -138,6 +146,8 @@ contract JurorsOnDemandArbitrator is IArbitrator {
         Dispute storage dispute = disputes[_disputeID];
         require(block.timestamp <= dispute.deadline, "The deadline has already passed.");
         require(dispute.jurorStatus == JurorStatus.Vacant, "Task has already been assigned or reimbursed.");
+
+        require(isInWhiteList(_disputeID, msg.sender), "Not authorized.");
 
         uint256 price = dispute.minPrice +
             ((dispute.maxPrice - dispute.minPrice) * (block.timestamp - dispute.lastInteraction)) /
@@ -165,16 +175,16 @@ contract JurorsOnDemandArbitrator is IArbitrator {
      *  @param _disputeID ID of the dispute to rule.
      *  @param _ruling Ruling given by the arbitrator. Note that 0 means "Not able/wanting to make a decision".
      */
-    function giveRuling(uint _disputeID, uint _ruling) external {
+    function giveRuling(uint256 _disputeID, uint256 _ruling) external {
         Dispute storage dispute = disputes[_disputeID];
         require(_ruling <= dispute.choices, "Invalid ruling.");
-        require(dispute.juror <= msg.sender, "Only the assigned juror can rule.");
+        require(dispute.juror == msg.sender, "Only the assigned juror can rule.");
         require(dispute.status == DisputeStatus.Waiting, "The dispute must be waiting for arbitration.");
         require(dispute.jurorStatus == JurorStatus.Assigned, "The juror has to be assigned.");
         require(block.timestamp - dispute.lastInteraction <= dispute.rulingTimeout, "Ruling period has passed.");
 
         dispute.ruling = _ruling;
-        dispute.jurorStatus = JurorStatus.RuleGiven;
+        dispute.jurorStatus = JurorStatus.RulingGiven;
         dispute.lastInteraction = block.timestamp; // Timestamp at which the appeal period starts
         dispute.status = DisputeStatus.Appealable;
 
@@ -185,26 +195,28 @@ contract JurorsOnDemandArbitrator is IArbitrator {
      *  @param _disputeID ID of the dispute to be appealed.
      *  @param _extraData Can be used to give extra info on the appeal.
      */
-    function appeal(uint _disputeID, bytes memory _extraData) public payable override {
+    function appeal(uint256 _disputeID, bytes calldata _extraData) external payable override {
         Dispute storage dispute = disputes[_disputeID];
-        // uint appealFee = appealCost(_disputeID, _extraData);
+        require(msg.sender == address(dispute.arbitrated), "Can only be called by the arbitrable contract.");
         require(dispute.status == DisputeStatus.Appealable, "The dispute must be appealable.");
-        require(block.timestamp < dispute.lastInteraction + dispute.appealTimeout, "The appeal period is over.");
 
-        if (dispute.appealID == 0) {
+        if (dispute.jurorStatus == JurorStatus.RulingGiven) {
+            require(block.timestamp < dispute.lastInteraction + dispute.appealTimeout, "The challenge period is over.");
             // create dispute in backup arbitrator
             uint256 challengeDeposit = dispute.minPrice.mulCap(challengeMultiplier) / MULTIPLIER_DIVISOR;
             uint256 backupArbitrationCost = dispute.backupArbitrator.arbitrationCost(dispute.backupArbitratorExtraData);
             challengeDeposit = challengeDeposit.addCap(backupArbitrationCost.mulCap(arbitrationCostMultiplier) / MULTIPLIER_DIVISOR);
             require(msg.value >= challengeDeposit, "Value is less than required appeal fee");
+            
             dispute.appealID = dispute.backupArbitrator.createDispute{value: backupArbitrationCost}(dispute.choices, dispute.backupArbitratorExtraData);
             dispute.jurorStatus = JurorStatus.Challenged;
-            dispute.sumDeposit += msg.value;
+            dispute.sumDeposit += msg.value - backupArbitrationCost;
         } else {
             // appeal backup arbitrator ruling
-            uint256 backupAppealCost = dispute.backupArbitrator.appealCost(_disputeID, dispute.backupArbitratorExtraData);
+            uint256 backupAppealCost = dispute.backupArbitrator.appealCost(dispute.appealID, dispute.backupArbitratorExtraData);
             require(msg.value >= backupAppealCost, "Value is less than required appeal fee");
-            dispute.appealID = dispute.backupArbitrator.createDispute{value: backupAppealCost}(dispute.choices, dispute.backupArbitratorExtraData);
+            dispute.backupArbitrator.appeal{value: backupAppealCost}(dispute.choices, dispute.backupArbitratorExtraData);
+            dispute.sumDeposit += msg.value - backupAppealCost;
         }
     
         dispute.status = DisputeStatus.Waiting;
@@ -212,35 +224,81 @@ contract JurorsOnDemandArbitrator is IArbitrator {
     }
 
     /** @dev Execute the ruling of a dispute after the appeal period has passed. UNTRUSTED.
+     *  Can only be called once per dispute if the conditions are met.
      *  @param _disputeID ID of the dispute to execute.
      */
     function executeRuling(uint _disputeID) external {
         Dispute storage dispute = disputes[_disputeID];
-        require(dispute.status == DisputeStatus.Appealable, "The dispute must be appealable.");
-        require(block.timestamp >= dispute.appealPeriodEnd, "The dispute must be executed after its appeal period has ended.");
-        require(dispute.jurorStatus == JurorStatus.Ruled, "The juror must have ruled.");
+        require(dispute.status < DisputeStatus.Solved, "Dispute is already solved.");
+
+        if (dispute.status == DisputeStatus.Appealable) {
+            require(dispute.jurorStatus == JurorStatus.RulingGiven, "The juror's ruling must not have been challenged.");
+            require(block.timestamp > dispute.lastInteraction + dispute.appealTimeout, "Cannot execute before the appeal period has ended.");
+
+            dispute.jurorStatus = JurorStatus.Resolved;
+            dispute.juror.send(dispute.sumDeposit + dispute.minPrice);
+            dispute.sumDeposit = 0; // clear storage
+        } else if (dispute.status == DisputeStatus.Waiting) {
+            if (dispute.jurorStatus == JurorStatus.Vacant)
+                require(block.timestamp > dispute.deadline, "Deadline has not passed.");
+            else if ( dispute.jurorStatus == JurorStatus.Assigned)
+                require(block.timestamp > dispute.lastInteraction + dispute.rulingTimeout + dispute.appealTimeout, "Ruling period has not passed.");
+            else
+                revert("Invalid status.");
+        }
 
         dispute.status = DisputeStatus.Solved;
         dispute.arbitrated.rule(_disputeID, dispute.ruling);
     }
 
+    /** @dev Gives the ruling for a dispute. Can only be called by the backup arbitrator.
+     *  The purpose of this function is to ensure that the address calling it has the right to rule on the contract and to invert the ruling in the case a party loses from lack of appeal fees funding.
+     *  @param _appealID ID of the dispute in the backup arbitrator contract (NOT this contract).
+     *  @param _ruling Ruling given by the arbitrator. Note that 0 is reserved for "Refuse to arbitrate".
+     */
+    function rule(uint256 _appealID, uint256 _ruling) external override {
+        uint256 disputeID = appealToDisputeID[msg.sender][_appealID];
+        Dispute storage dispute = disputes[disputeID];
+        
+        require(msg.sender == address(dispute.backupArbitrator), "Must be called by the backup arbitrator.");
+        require(dispute.jurorStatus == JurorStatus.Challenged, "The dispute has already been resolved.");
+        require(dispute.status == DisputeStatus.Waiting, "The dispute has already been resolved.");
+        require(_ruling <= dispute.choices, "Invalid ruling.");
+
+        // Distribute/register rewards and penalties
+        if (_ruling == dispute.ruling) {
+            dispute.juror.send(dispute.sumDeposit + dispute.minPrice);
+            dispute.sumDeposit = 0; // clear storage
+        }
+
+        dispute.status = DisputeStatus.Solved;
+        dispute.jurorStatus = JurorStatus.Resolved;
+        dispute.ruling = _ruling;
+        dispute.arbitrated.rule(disputeID, _ruling);
+
+        emit Ruling(IArbitrator(msg.sender), _appealID, _ruling);
+    }
+
     function withdrawRemainingFees(uint256 _disputeID) external returns(uint256 remainder) {
         Dispute storage dispute = disputes[_disputeID];
+        require(msg.sender == address(dispute.arbitrated), "Can only be called by the arbitrable contract.");
         require(dispute.status == DisputeStatus.Solved, "The dispute must be solved.");
         if (dispute.jurorStatus == JurorStatus.Vacant || dispute.jurorStatus == JurorStatus.Assigned) {
             remainder = dispute.maxPrice;
+            dispute.maxPrice = 0;
             dispute.arbitrated.send(remainder);
-        } else if (dispute.jurorStatus == JurorStatus.Ruled) {
-            remainder = dispute.maxPrice - dispute.minPrice; // At this point minPrice == real price.
+        } else if (dispute.jurorStatus == JurorStatus.Resolved) {
+            // At this point minPrice == real price.
+            // If ruling was appealed and won, get sumDeposit.
+            remainder = dispute.maxPrice == 0 ? 0 : dispute.maxPrice - dispute.minPrice;
+            dispute.maxPrice = 0;
             dispute.arbitrated.send(remainder);
         }
-        dispute.maxPrice = 0;
-        dispute.minPrice = 0;
     }
 
-     /** @dev Gets a subcourt ID and the minimum number of jurors required from a specified extra data bytes array.
+    /** @dev Extracts data from the extraData provided on the creation of a dispute.
      *  @param _rawExtraData The extra data bytes array.
-     *  @return extraData .
+     *  @return extraData decoded into ExtraData struct.
      */
     function decodeExtraData(bytes calldata _rawExtraData) internal view returns (ExtraData memory extraData) {
         // TODO: check vulnerabilities regarding calldata manipulation
@@ -261,7 +319,7 @@ contract JurorsOnDemandArbitrator is IArbitrator {
         
         // Decode whitelist if any
         extraData.whiteList = new address[](whiteListSize);
-        uint256 start = WORD_SIZE*6;
+        uint256 start = WORD_SIZE * 6;
         for (uint256 i = 0; i < whiteListSize; i++) {
             extraData.whiteList[i] = abi.decode(
                 _rawExtraData[start + i*WORD_SIZE: start + (i+1)*WORD_SIZE], 
@@ -270,7 +328,7 @@ contract JurorsOnDemandArbitrator is IArbitrator {
         }
 
         // Decode extraData of the backup arbitrator
-        start += whiteListSize*WORD_SIZE;
+        start += whiteListSize * WORD_SIZE;
         uint256 remainingBytes = _rawExtraData.length - start;
         extraData.backupArbitratorExtraData = new bytes(remainingBytes);
         for (uint256 i = 0; i < remainingBytes; i++) {
@@ -278,24 +336,80 @@ contract JurorsOnDemandArbitrator is IArbitrator {
         }
     }
 
+    /** @dev Extracts data from the extraData provided on the creation of a dispute.
+     *  @param _disputeID The extra data bytes array.
+     *  @param _requester The extra data bytes array.
+     *  @return validRequester decoded into ExtraData struct.
+     */
+    function isInWhiteList(uint256 _disputeID, address _requester) public view returns (bool validRequester) {
+        Dispute storage dispute = disputes[_disputeID];
+        if (dispute.whiteList.length == 0)
+            return true;
+            
+        for (uint256 i = 0; i < dispute.whiteList.length; i++)
+            if (dispute.whiteList[i] == _requester)
+                return true;
+    }
+
+    /** @dev Gets the deposit required for self-assigning the task.
+     *  @param _disputeID The extra data bytes array.
+     *  @param _juror The extra data bytes array.
+     *  @return deposit The translator's deposit.
+     */
+    function getDepositValue(uint256 _disputeID, address _juror) external view returns (uint256 deposit) {
+        Dispute storage dispute = disputes[_disputeID];
+        if (block.timestamp <= dispute.deadline && dispute.jurorStatus == JurorStatus.Vacant && isInWhiteList(_disputeID, _juror)) {
+            uint256 price = dispute.minPrice +
+                ((dispute.maxPrice - dispute.minPrice) * (block.timestamp - dispute.lastInteraction)) /
+                (dispute.deadline - dispute.lastInteraction);
+            uint256 backupArbitrationCost = dispute.backupArbitrator.arbitrationCost(dispute.backupArbitratorExtraData);
+            deposit = backupArbitrationCost.mulCap(arbitrationCostMultiplier) / MULTIPLIER_DIVISOR;
+            deposit = deposit.addCap(price.mulCap(assignationMultiplier) / MULTIPLIER_DIVISOR);
+        } else {
+            deposit = NOT_PAYABLE_VALUE;
+        }
+    }
+
+    /** @dev Gets the current price of a specified dispute.
+     *  @param _disputeID The ID of the dispute.
+     *  @return price The price of the dispute.
+     */
+    function getDisputePrice(uint256 _disputeID) external view returns (uint256 price) {
+        Dispute storage dispute = disputes[_disputeID];
+        if (block.timestamp <= dispute.deadline && dispute.jurorStatus == JurorStatus.Vacant && isInWhiteList(_disputeID, _juror)) {
+            price = dispute.minPrice +
+                ((dispute.maxPrice - dispute.minPrice) * (block.timestamp - dispute.lastInteraction)) /
+                (dispute.deadline - dispute.lastInteraction);
+        }
+    }
+
     /** @dev Return the status of a dispute (in the sense of ERC792, not the Dispute property).
      *  @param _disputeID ID of the dispute to rule.
      *  @return status The status of the dispute.
      */
-    function disputeStatus(uint _disputeID) public view override returns(DisputeStatus status) {
+    function disputeStatus(uint256 _disputeID) external view override returns(DisputeStatus status) {
         Dispute storage dispute = disputes[_disputeID];
+        if (dispute.jurorStatus == JurorStatus.Challenged) {
+            (uint256 start, uint256 end) = dispute.backupArbitrator.appealPeriod(dispute.appealID);
+        }
+        else {
+            return disputes[_disputeID].status;
+        }
+            
         if (disputes[_disputeID].status==DisputeStatus.Appealable && block.timestamp>=dispute.appealPeriodEnd) // If the appeal period is over, consider it solved even if rule has not been called yet.
             return DisputeStatus.Solved;
-        else
-            return disputes[_disputeID].status;
     }
 
     /** @dev Return the ruling of a dispute.
      *  @param _disputeID ID of the dispute.
      *  @return ruling The ruling which have been given or which would be given if no appeals are raised.
      */
-    function currentRuling(uint _disputeID) public view override returns(uint ruling) {
-        return disputes[_disputeID].ruling;
+    function currentRuling(uint256 _disputeID) external view override returns(uint256 ruling) {
+        Dispute storage dispute = disputes[_disputeID];
+        if (dispute.jurorStatus == JurorStatus.Challenged)
+            ruling = dispute.backupArbitrator.currentRuling();
+        else
+            ruling = disputes[_disputeID].ruling;
     }
 
     /** @dev Compute the start and end of the dispute's current or next appeal period, if possible.
@@ -303,9 +417,11 @@ contract JurorsOnDemandArbitrator is IArbitrator {
      *  @return start The start of the period.
      *  @return end The End of the period.
      */
-    function appealPeriod(uint _disputeID) public view override returns(uint start, uint end) {
-        Dispute storage dispute = disputes[_disputeID];
-        return (dispute.appealPeriodStart, dispute.appealPeriodEnd);
+    function appealPeriod(uint256 _disputeID) external view override returns(uint256 start, uint256 end) {
+        if (dispute.jurorStatus == JurorStatus.Challenged)
+            return dispute.backupArbitrator.appealPeriod(dispute.appealID);
+        else
+            return (0, 0);
     }
 
 }
