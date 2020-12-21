@@ -37,7 +37,7 @@ The backup arbitrator could be, for example, a private arbitrator contract, this
 
 - Restrict backup arbitrators to a whitelist maintained by the contract owner/governor.
 - Using the same appeal-delegation concept, implement this same contract or another arbitrator with cross-chain logic. For example, let first round of arbitration happen on xDai chain and delegate appeals to mainnet.
-- Optimize gas costs by packing state variables or implementing hash-not-store pattern.
+- Optimize gas.
 - Implement a tokenize version of the contract, in order to allow payments in any ERC20 token.
 - Consider to have an individual meta-evidence for each dispute.
 - Appeal extra-data is ignored?

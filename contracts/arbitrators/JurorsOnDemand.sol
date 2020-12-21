@@ -31,10 +31,10 @@ contract JurorsOnDemandArbitrator is IArbitrator, IArbitrable, IEvidence {
     enum JurorStatus { Vacant, Assigned, RulingGiven, Challenged, Resolved }
 
     struct ExtraData {
-        uint256 deadline;
+        uint64 deadline;
         uint256 minPrice;
-        uint256 rulingTimeout;
-        uint256 appealTimeout;
+        uint64 rulingTimeout;
+        uint64 appealTimeout;
         IArbitrator backupArbitrator;
         address[] whiteList;
         bytes backupArbitratorExtraData;
@@ -50,12 +50,12 @@ contract JurorsOnDemandArbitrator is IArbitrator, IArbitrable, IEvidence {
         uint256 choices;           // The amount of possible choices, 0 excluded.
         uint256 minPrice;
         uint256 maxPrice;          // The max amount of fees collected by the arbitrator.
-        uint256 deadline;
-        uint256 lastInteraction;
+        uint64 deadline;
+        uint64 lastInteraction;
+        uint64 rulingTimeout;     // The current ruling.
+        uint64 appealTimeout;     // Only valid fot the first appeal. Afterwards, the backup arbitrator handles the appeal periods
         uint256 sumDeposit;
-        uint256 rulingTimeout;     // The current ruling.
         uint256 ruling;            // The current ruling.
-        uint256 appealTimeout;     // Only valid fot the first appeal. Afterwards, the backup arbitrator handles the appeal periods
         uint256 appealID;          // disputeID of the dispute delegated to the backup arbitrator.
         address[] whiteList;
     }
@@ -83,6 +83,27 @@ contract JurorsOnDemandArbitrator is IArbitrator, IArbitrable, IEvidence {
         emit MetaEvidence(META_EVIDENCE_ID, _metaEvidence);
     }
 
+    /** @dev Changes the multiplier for the arbitration/appeal cost part of the juror/challenger deposit.
+     *  @param _arbitrationCostMultiplier A new value of the multiplier for calculating juror/challenger's deposit. In basis points.
+     */
+    function changeArbitrationCostMultiplier(uint256 _arbitrationCostMultiplier) public onlyOwner {
+        arbitrationCostMultiplier = _arbitrationCostMultiplier;
+    }
+
+    /** @dev Changes the multiplier for the arbitration price part of juror's deposit.
+     *  @param _assignationMultiplier A new value of the multiplier for calculating juror's deposit. In basis points.
+     */
+    function changeAssignationMultiplier(uint256 _assignationMultiplier) public onlyOwner {
+        assignationMultiplier = _assignationMultiplier;
+    }
+
+    /** @dev Changes the multiplier for challengers' deposit.
+     *  @param _challengeMultiplier A new value of the multiplier for calculating challenger's deposit. In basis points.
+     */
+    function changeChallengeMultiplier(uint256 _challengeMultiplier) public onlyOwner {
+        challengeMultiplier = _challengeMultiplier;
+    }
+
     /** @dev Cost of arbitration. Accessor to arbitrationPrice.
      *  @return Minimum amount to be paid.
      */
@@ -108,9 +129,9 @@ contract JurorsOnDemandArbitrator is IArbitrator, IArbitrable, IEvidence {
     }
 
     /** @dev Create a dispute. Must be called by the arbitrable contract.
-     *  Must be paid at least arbitrationCost().
-     *  @param _choices Amount of choices the arbitrator can make in this dispute. When ruling <= choices.
-     *  @param _rawExtraData Can be used to give additional info on the dispute to be created.
+     *  Must be paid at least the minimum arbitration price specified.
+     *  @param _choices Amount of choices the arbitrator can make in this dispute. ruling <= choices.
+     *  @param _rawExtraData Additional information about the auction to be launched to look for jurors as well as appeal rules.
      *  @return disputeID ID of the dispute created.
      */
     function createDispute(uint256 _choices, bytes calldata _rawExtraData) external payable override returns(uint256 disputeID) {
@@ -127,9 +148,9 @@ contract JurorsOnDemandArbitrator is IArbitrator, IArbitrable, IEvidence {
         dispute.backupArbitratorExtraData = extraData.backupArbitratorExtraData;
         dispute.choices = _choices;
         dispute.minPrice = extraData.minPrice;
-        dispute.maxPrice = msg.value;          // The max amount of fees collected by the arbitrator.
+        dispute.maxPrice = msg.value; // The max amount of fees collected by the arbitrator.
         dispute.deadline = extraData.deadline;
-        dispute.lastInteraction = block.timestamp;
+        dispute.lastInteraction = uint64(block.timestamp);
         dispute.rulingTimeout = extraData.rulingTimeout;
         dispute.appealTimeout = extraData.appealTimeout;
         dispute.whiteList = extraData.whiteList;
@@ -166,7 +187,7 @@ contract JurorsOnDemandArbitrator is IArbitrator, IArbitrable, IEvidence {
         dispute.jurorStatus = JurorStatus.Assigned;
         dispute.minPrice = price; // for jurorStatus >= Assigned, minPrice stores the real price
         dispute.sumDeposit = assignationDeposit;
-        dispute.lastInteraction = block.timestamp;
+        dispute.lastInteraction = uint64(block.timestamp);
 
         emit DisputeAssigned(_disputeID, msg.sender, price);
     }
@@ -185,7 +206,7 @@ contract JurorsOnDemandArbitrator is IArbitrator, IArbitrable, IEvidence {
 
         dispute.ruling = _ruling;
         dispute.jurorStatus = JurorStatus.RulingGiven;
-        dispute.lastInteraction = block.timestamp; // Timestamp at which the appeal period starts
+        dispute.lastInteraction = uint64(block.timestamp); // Timestamp at which the appeal period starts
         dispute.status = DisputeStatus.Appealable;
 
         emit AppealPossible(_disputeID, dispute.arbitrated);
@@ -205,21 +226,18 @@ contract JurorsOnDemandArbitrator is IArbitrator, IArbitrable, IEvidence {
             // create dispute in backup arbitrator
             uint256 challengeDeposit = dispute.minPrice.mulCap(challengeMultiplier) / MULTIPLIER_DIVISOR;
             uint256 backupArbitrationCost = dispute.backupArbitrator.arbitrationCost(dispute.backupArbitratorExtraData);
-            challengeDeposit = challengeDeposit.addCap(backupArbitrationCost.mulCap(arbitrationCostMultiplier) / MULTIPLIER_DIVISOR);
-            require(msg.value >= challengeDeposit, "Value is less than required appeal fee");
+            require(msg.value >= challengeDeposit.addCap(backupArbitrationCost), "Value is less than required appeal fee");
             
-            dispute.appealID = dispute.backupArbitrator.createDispute{value: backupArbitrationCost}(dispute.choices, dispute.backupArbitratorExtraData);
             dispute.jurorStatus = JurorStatus.Challenged;
-            dispute.sumDeposit += msg.value - backupArbitrationCost;
+            dispute.appealID = dispute.backupArbitrator.createDispute{value: backupArbitrationCost}(dispute.choices, dispute.backupArbitratorExtraData);
+            dispute.sumDeposit += challengeDeposit;
         } else {
             // appeal backup arbitrator ruling
             uint256 backupAppealCost = dispute.backupArbitrator.appealCost(dispute.appealID, dispute.backupArbitratorExtraData);
             require(msg.value >= backupAppealCost, "Value is less than required appeal fee");
             dispute.backupArbitrator.appeal{value: backupAppealCost}(dispute.choices, dispute.backupArbitratorExtraData);
-            dispute.sumDeposit += msg.value - backupAppealCost;
         }
     
-        dispute.status = DisputeStatus.Waiting;
         emit AppealDecision(_disputeID, IArbitrable(msg.sender));
     }
 
@@ -227,7 +245,7 @@ contract JurorsOnDemandArbitrator is IArbitrator, IArbitrable, IEvidence {
      *  Can only be called once per dispute if the conditions are met.
      *  @param _disputeID ID of the dispute to execute.
      */
-    function executeRuling(uint _disputeID) external {
+    function executeRuling(uint256 _disputeID) external {
         Dispute storage dispute = disputes[_disputeID];
         require(dispute.status < DisputeStatus.Solved, "Dispute is already solved.");
 
@@ -236,7 +254,7 @@ contract JurorsOnDemandArbitrator is IArbitrator, IArbitrable, IEvidence {
             require(block.timestamp > dispute.lastInteraction + dispute.appealTimeout, "Cannot execute before the appeal period has ended.");
 
             dispute.jurorStatus = JurorStatus.Resolved;
-            dispute.juror.send(dispute.sumDeposit + dispute.minPrice);
+            dispute.juror.send(dispute.sumDeposit + dispute.minPrice); // minPrice = price
             dispute.sumDeposit = 0; // clear storage
         } else if (dispute.status == DisputeStatus.Waiting) {
             if (dispute.jurorStatus == JurorStatus.Vacant)
@@ -262,7 +280,7 @@ contract JurorsOnDemandArbitrator is IArbitrator, IArbitrable, IEvidence {
         
         require(msg.sender == address(dispute.backupArbitrator), "Must be called by the backup arbitrator.");
         require(dispute.jurorStatus == JurorStatus.Challenged, "The dispute has already been resolved.");
-        require(dispute.status == DisputeStatus.Waiting, "The dispute has already been resolved.");
+        require(dispute.status == DisputeStatus.Appealable, "The dispute has already been resolved.");
         require(_ruling <= dispute.choices, "Invalid ruling.");
 
         // Distribute/register rewards and penalties
@@ -283,9 +301,11 @@ contract JurorsOnDemandArbitrator is IArbitrator, IArbitrable, IEvidence {
         Dispute storage dispute = disputes[_disputeID];
         require(msg.sender == address(dispute.arbitrated), "Can only be called by the arbitrable contract.");
         require(dispute.status == DisputeStatus.Solved, "The dispute must be solved.");
+
         if (dispute.jurorStatus == JurorStatus.Vacant || dispute.jurorStatus == JurorStatus.Assigned) {
-            remainder = dispute.maxPrice;
+            remainder = dispute.maxPrice + dispute.sumDeposit;
             dispute.maxPrice = 0;
+            dispute.sumDeposit = 0;
             dispute.arbitrated.send(remainder);
         } else if (dispute.jurorStatus == JurorStatus.Resolved) {
             // At this point minPrice == real price.
@@ -314,7 +334,7 @@ contract JurorsOnDemandArbitrator is IArbitrator, IArbitrable, IEvidence {
             whiteListSize,
         ) = abi.decode(
             _rawExtraData[0:WORD_SIZE*6], 
-            (uint256, uint256, uint256, uint256, address, uint256)
+            (uint64, uint256, uint64, uint64, address, uint256)
         );
         
         // Decode whitelist if any
@@ -336,10 +356,10 @@ contract JurorsOnDemandArbitrator is IArbitrator, IArbitrable, IEvidence {
         }
     }
 
-    /** @dev Extracts data from the extraData provided on the creation of a dispute.
-     *  @param _disputeID The extra data bytes array.
-     *  @param _requester The extra data bytes array.
-     *  @return validRequester decoded into ExtraData struct.
+    /** @dev Checks if an address is allowed to rule on a given dispute.
+     *  @param _disputeID ID of the dispute.
+     *  @param _requester Address of the juror.
+     *  @return validRequester true if the address is allowed to rule.
      */
     function isInWhiteList(uint256 _disputeID, address _requester) public view returns (bool validRequester) {
         Dispute storage dispute = disputes[_disputeID];
@@ -390,14 +410,13 @@ contract JurorsOnDemandArbitrator is IArbitrator, IArbitrable, IEvidence {
     function disputeStatus(uint256 _disputeID) external view override returns(DisputeStatus status) {
         Dispute storage dispute = disputes[_disputeID];
         if (dispute.jurorStatus == JurorStatus.Challenged) {
-            (uint256 start, uint256 end) = dispute.backupArbitrator.appealPeriod(dispute.appealID);
-        }
-        else {
-            return disputes[_disputeID].status;
-        }
-            
-        if (disputes[_disputeID].status==DisputeStatus.Appealable && block.timestamp>=dispute.appealPeriodEnd) // If the appeal period is over, consider it solved even if rule has not been called yet.
+            return dispute.backupArbitrator.disputeStatus(dispute.appealID);
+        } else if (dispute.status == DisputeStatus.Appealable && block.timestamp > dispute.lastInteraction + dispute.appealTimeout) {
+            // If the appeal period is over, consider it solved even if rule has not been called yet.
             return DisputeStatus.Solved;
+        } else {
+            return dispute.status;
+        }
     }
 
     /** @dev Return the ruling of a dispute.
@@ -409,19 +428,34 @@ contract JurorsOnDemandArbitrator is IArbitrator, IArbitrable, IEvidence {
         if (dispute.jurorStatus == JurorStatus.Challenged)
             ruling = dispute.backupArbitrator.currentRuling();
         else
-            ruling = disputes[_disputeID].ruling;
+            ruling = dispute.ruling;
     }
 
     /** @dev Compute the start and end of the dispute's current or next appeal period, if possible.
      *  @param _disputeID ID of the dispute.
      *  @return start The start of the period.
-     *  @return end The End of the period.
+     *  @return end The end of the period.
      */
     function appealPeriod(uint256 _disputeID) external view override returns(uint256 start, uint256 end) {
-        if (dispute.jurorStatus == JurorStatus.Challenged)
-            return dispute.backupArbitrator.appealPeriod(dispute.appealID);
-        else
-            return (0, 0);
+        if (dispute.jurorStatus == JurorStatus.Challenged) {
+            (start, end) = dispute.backupArbitrator.appealPeriod(dispute.appealID);
+        } else if (
+            dispute.status == DisputeStatus.Appealable && 
+            block.timestamp <= dispute.lastInteraction + dispute.appealTimeout
+        ) {
+            start = dispute.lastInteraction;
+            end = start + dispute.appealTimeout;
+        } else if (
+            dispute.status == DisputeStatus.Waiting && 
+            block.timestamp > dispute.lastInteraction + dispute.rulingTimeout && 
+            block.timestamp <= dispute.lastInteraction + dispute.rulingTimeout + dispute.appealTimeout
+        ) {
+            start = dispute.lastInteraction + dispute.rulingTimeout;
+            end = start + dispute.appealTimeout;
+        } else {
+            start = 0;
+            end = 0;
+        }
     }
 
 }
