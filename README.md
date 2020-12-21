@@ -17,19 +17,17 @@ Some of the benefits of this price strategy:
 
 The bid for jurors can be open to anyone or restricted to a whitelist of addresses provided by the arbitrated contract.
 
-Why whitelist jurors? Parties could be interested in hiring a specific juror, due to competence, reputation or whatever reason. I believe this has the potential to create a virtous circle, in which jurors actively seek to increase their efficiency/efficacy and reputation so that parties consider adding them in the whitelist.
+Why whitelist jurors? Parties could be interested in hiring a specific juror, due to competence, reputation or whatever reason. I believe this has the potential to create a virtous circle, in which jurors actively seek to increase their efficiency/efficacy and reputation so that parties consider adding them in the whitelist. This mechanism can also provide economic feedback about what kind of juror/resolution is being looked for in the market.
 
 I also think this system could reduce the need to create new Kleros subcourts for every new use case.
 
-Also notice that the juror could be another smart contract.
+The juror can be and EOA or another smart contract.
 
 ## Appeals
 
 In order to make this arbitrator robust against malicious, negligent or controversial jurors, appeals are delegated to a backup arbitrator specified by the arbitrable contract which created the dispute. 
 
-JurorsOnDemand is still an arbitrator contract, although the backup arbitrator will think of it as an arbitrable contract. In KlerosLiquid there are court jumps, here we have arbitrator jumps.
-
-The backup arbitrator could be, for example, a private arbitrator contract, this contract with another configuration or a Kleros court.
+JurorsOnDemand is still an arbitrator contract, although the backup arbitrator will think of it as an arbitrable contract. In KlerosLiquid there are court jumps, here we have arbitrator jumps. In future version, these jumps could be implemented from one chain to another.
 
 
 # Future work
@@ -39,6 +37,5 @@ The backup arbitrator could be, for example, a private arbitrator contract, this
 - Optimize gas.
 - Implement a tokenize version of the contract, in order to allow payments in any ERC20 token.
 - Consider to have an individual meta-evidence for each dispute.
-- Appeal extra-data is ignored?
 - Explore ways to decouple arbitrator's and backup arbitrator's rulings. Not necesarily should they rule over the same thing.
 
