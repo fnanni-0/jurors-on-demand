@@ -22,11 +22,11 @@ contract JurorsOnDemandArbitrator is IArbitrator, IArbitrable, IEvidence {
     using CappedMath for uint; // Operations bounded between 0 and 2**256 - 1.
 
     address public owner = msg.sender;
-    uint256 public constant WORD_SIZE = 32;
     uint256 public constant MULTIPLIER_DIVISOR = 10000; // Divisor parameter for multipliers.
     uint256 public constant DEFAULT_MIN_PRICE = 0;
     uint256 public constant NOT_PAYABLE_VALUE = (2**256-2)/2; // High value to be sure that the appeal is too expensive.
     uint256 public constant META_EVIDENCE_ID = 0;
+    uint256 private constant WORD_SIZE = 32; // Used in decoding extraData
 
     enum JurorStatus { Vacant, Assigned, RulingGiven, Challenged, Resolved }
 
@@ -58,6 +58,7 @@ contract JurorsOnDemandArbitrator is IArbitrator, IArbitrable, IEvidence {
         uint256 ruling;            // The current ruling.
         uint256 appealID;          // disputeID of the dispute delegated to the backup arbitrator.
         address[] whiteList;
+        uint256 amountTransferredToJuror;
     }
 
     uint256 public arbitrationCostMultiplier; // Multiplier for calculating the arbitration cost related part of the deposit translator must pay to self-assign a task.
@@ -107,7 +108,7 @@ contract JurorsOnDemandArbitrator is IArbitrator, IArbitrable, IEvidence {
     /** @dev Cost of arbitration. Accessor to arbitrationPrice.
      *  @return Minimum amount to be paid.
      */
-    function arbitrationCost(bytes calldata) external view override returns(uint) {
+    function arbitrationCost(bytes calldata) external view override returns(uint256) {
         return DEFAULT_MIN_PRICE;
     }
 
@@ -115,7 +116,7 @@ contract JurorsOnDemandArbitrator is IArbitrator, IArbitrable, IEvidence {
      *  @param _disputeID ID of the dispute to be appealed.
      *  @return fee Amount to be paid.
      */
-    function appealCost(uint _disputeID, bytes calldata) external view override returns(uint fee) {
+    function appealCost(uint256 _disputeID, bytes calldata) external view override returns(uint256 fee) {
         Dispute storage dispute = disputes[_disputeID];
         if (dispute.status != DisputeStatus.Appealable)
             fee = NOT_PAYABLE_VALUE;
@@ -255,6 +256,7 @@ contract JurorsOnDemandArbitrator is IArbitrator, IArbitrable, IEvidence {
 
             dispute.jurorStatus = JurorStatus.Resolved;
             dispute.juror.send(dispute.sumDeposit + dispute.minPrice); // minPrice = price
+            dispute.amountTransferredToJuror = dispute.sumDeposit + dispute.minPrice;
             dispute.sumDeposit = 0; // clear storage
         } else if (dispute.status == DisputeStatus.Waiting) {
             if (dispute.jurorStatus == JurorStatus.Vacant)
@@ -286,6 +288,7 @@ contract JurorsOnDemandArbitrator is IArbitrator, IArbitrable, IEvidence {
         // Distribute/register rewards and penalties
         if (_ruling == dispute.ruling) {
             dispute.juror.send(dispute.sumDeposit + dispute.minPrice);
+            dispute.amountTransferredToJuror = dispute.sumDeposit + dispute.minPrice;
             dispute.sumDeposit = 0; // clear storage
         }
 
@@ -314,6 +317,10 @@ contract JurorsOnDemandArbitrator is IArbitrator, IArbitrable, IEvidence {
             dispute.maxPrice = 0;
             dispute.arbitrated.send(remainder);
         }
+    }
+
+    function amountTransferredToJuror(uint256 _disputeID) external view returns(uint256) {
+        return disputes[_disputeID].amountTransferredToJuror;
     }
 
     /** @dev Extracts data from the extraData provided on the creation of a dispute.

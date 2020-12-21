@@ -35,14 +35,19 @@ interface IProofOfHumanity {
 
 contract OnlyHumanJurors {
 
+    struct DisputeData {
+        address payable juror;
+        bool withdrawn;
+    }
+
     IProofOfHumanity public immutable proofOfHumanity;
     JurorsOnDemandArbitrator public immutable jurorsOnDemand;
 
-    mapping(uint256 => address) public disputeIDtoJuror;
+    mapping(uint256 => DisputeData) public disputes;
 
     /** @dev Constructor.
-     *  @param _proofOfHumanity The Proof Of Humanity registry to reference.
-     *  @param _jurorsOnDemand The jurorsOnDemand arbitrator.
+     *  @param _proofOfHumanity The Proof Of Humanity registry to reference. TRUSTED.
+     *  @param _jurorsOnDemand The jurorsOnDemand arbitrator. TRUSTED.
      */
     constructor(
         IProofOfHumanity _proofOfHumanity,
@@ -59,21 +64,24 @@ contract OnlyHumanJurors {
         uint256 deposit = jurorsOnDemand.getDepositValue(_disputeID, msg.sender);
         require(msg.value >= deposit, "Not enough ETH");
         msg.sender.send(msg.value - deposit);
-        disputeIDtoJuror[_disputeID] = msg.sender;
+        DisputeData storage disputeData = disputes[_disputeID];
+        disputeData.juror = msg.sender;
 
         jurorsOnDemand.assignDispute{value: deposit}(_disputeID);
     }
 
     function giveRuling(uint256 _disputeID, uint256 _ruling) external {
-        require(disputeIDtoJuror[_disputeID] == msg.sender, "Caller is not the juror");
+        require(disputes[_disputeID].juror == msg.sender, "Caller is not the juror");
         jurorsOnDemand.giveRuling(_disputeID, _ruling);
     }
 
     function withdraw(uint256 _disputeID) external {
-        require(disputeIDtoJuror[_disputeID] == msg.sender, "Caller is not the juror");
+        DisputeData storage disputeData = disputes[_disputeID];
+        require(disputeData.withdrawn == false, "Already withdrawn.");
 
-        DisputeStatus status = jurorsOnDemand.disputeStatus(_disputeID);
-        uint256 ruling = jurorsOnDemand.currentRuling(_disputeID);
+        uint256 amount = jurorsOnDemand.amountTransferredToJuror(_disputeID);
+        disputeData.withdrawn = true;
+        disputeData.juror.send(amount);
     }
 
     receive() external payable {}
