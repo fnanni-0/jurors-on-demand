@@ -17,11 +17,11 @@ Some of the benefits of this price strategy:
 
 The bid for jurors can be open to anyone or restricted to a whitelist of addresses provided by the arbitrated contract.
 
-Why whitelist jurors? Parties could be interested in hiring a specific juror, due to competence, reputation or whatever reason. I believe this has the potential to create a virtous circle, in which jurors actively seek to increase their efficiency/efficacy and reputation so that parties consider adding them in the whitelist. This mechanism can also provide economic feedback about what kind of juror/resolution is being looked for in the market.
+Why whitelist jurors? Parties could be interested in hiring a specific juror, due to competence, reputation or whatever reason. I believe this has the potential to create a virtous circle, in which jurors actively seek to increase their efficiency/efficacy and reputation so that parties consider adding them in the whitelist.
 
 I also think this system could reduce the need to create new Kleros subcourts for every new use case.
 
-The juror can be and EOA or another smart contract.
+Juror can be EOAs or smart contracts.
 
 ## Appeals
 
